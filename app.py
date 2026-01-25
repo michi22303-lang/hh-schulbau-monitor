@@ -2,127 +2,159 @@ import streamlit as st
 import requests
 import pandas as pd
 
+# --- DATENBASIS (Musterdaten) ---
+# Struktur: Bezirk -> Stadtteil -> Liste von Schulen (Name, Kennziffer/Schülerzahl)
+# In einer echten App würde das aus einer CSV oder Datenbank kommen.
+SCHUL_DATEN = {
+    "Altona": {
+        "Othmarschen": [
+            {"name": "Gymnasium Hochrad", "id": "5887", "students": "ca. 950"} 
+        ]
+    },
+    "Bergedorf": {
+        "Kirchwerder": [
+            {"name": "Schule Zollenspieker", "id": "5648", "students": "ca. 230"}
+        ]
+    },
+    "Mitte": {
+        "Billstedt": [
+            {"name": "Grundschule Mümmelmannsberg", "id": "5058", "students": "ca. 340"}
+        ]
+    }
+}
+
 # --- KONFIGURATION ---
 API_URL = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 
 # --- FUNKTIONEN ---
-
 def query_transparenzportal(search_term, limit=5):
-    """
-    Fragt die CKAN API des Hamburger Transparenzportals ab.
-    """
+    """Fragt die CKAN API ab."""
     params = {
         "q": search_term,
         "rows": limit,
-        "sort": "score desc, metadata_modified desc" # Relevanz + Aktualität
+        "sort": "score desc, metadata_modified desc"
     }
-    
     try:
         response = requests.get(API_URL, params=params)
         response.raise_for_status()
         data = response.json()
-        
-        if data["success"]:
-            return data["result"]["results"]
-        else:
-            return []
+        return data["result"]["results"] if data["success"] else []
     except Exception as e:
-        st.error(f"Fehler bei der API-Abfrage: {e}")
+        st.error(f"API-Fehler: {e}")
         return []
 
-def extract_key_info(results):
-    """
-    Wandelt die JSON-Antwort in eine saubere Liste für die Anzeige um.
-    """
-    cleaned_data = []
+def extract_docs(results):
+    """Extrahiert Titel und Links aus den Ergebnissen."""
+    cleaned = []
     for item in results:
-        # Link zum Dokument finden (PDFs bevorzugt)
         resources = item.get("resources", [])
-        pdf_link = None
-        web_link = item.get("url", "") # Fallback auf Portal-Link
-        
+        # Versuche PDF zu finden, sonst nimm den Hauptlink
+        target_link = item.get("url", "")
         for res in resources:
             if res.get("format", "").lower() == "pdf":
-                pdf_link = res.get("url")
+                target_link = res.get("url")
                 break
         
-        link = pdf_link if pdf_link else web_link
-        
-        cleaned_data.append({
-            "Titel": item.get("title"),
-            "Datum": item.get("metadata_modified", "")[:10], # Nur YYYY-MM-DD
-            "Behörde": item.get("author", "Unbekannt"),
-            "Link": link
+        cleaned.append({
+            "Dokument": item.get("title"),
+            "Datum": item.get("metadata_modified", "")[:10],
+            "Link": target_link
         })
-    return cleaned_data
+    return cleaned
 
-# --- STREAMLIT UI ---
-
-st.set_page_config(page_title="HH Schulbau Monitor", layout="wide")
+# --- UI SETUP ---
+st.set_page_config(page_title="HH Schulbau Monitor V2", layout="wide")
 
 st.title("🏫 Hamburger Schulbau-Monitor")
-st.markdown("Automatisierte Recherche im Transparenzportal der FHH für Immobilien-Checkups.")
+st.markdown("Recherche-Tool für Schulimmobilien mit Standort-Drilldown.")
 
-# Sidebar für Eingaben
+# --- SIDEBAR: KASKADIERENDE AUSWAHL ---
 with st.sidebar:
-    st.header("Projektdaten")
-    schul_name = st.text_input("Name der Schule", "Ida-Ehre-Schule")
-    bezirk = st.selectbox("Bezirk / Stadtteil", ["Eimsbüttel", "Altona", "Hamburg-Nord", "Wandsbek", "Bergedorf", "Harburg", "Mitte"])
-    strasse = st.text_input("Straßenname (optional)", "Bogenstraße")
-    
-    start_search = st.button("Recherche starten")
+    st.header("Standort-Auswahl")
 
-# Hauptbereich
-if start_search:
+    # 1. Ebene: Bezirk
+    bezirke = list(SCHUL_DATEN.keys())
+    selected_bezirk = st.selectbox("1. Bezirk wählen", bezirke)
+
+    # 2. Ebene: Stadtteil (abhängig von Bezirk)
+    stadtteile = list(SCHUL_DATEN[selected_bezirk].keys())
+    selected_stadtteil = st.selectbox("2. Stadtteil wählen", stadtteile)
+
+    # 3. Ebene: Schule (abhängig von Stadtteil)
+    # Wir holen die Liste der Schul-Dictionaries
+    schulen_liste = SCHUL_DATEN[selected_bezirk][selected_stadtteil]
+    # Für die Selectbox zeigen wir nur den Namen an
+    schule_obj = st.selectbox(
+        "3. Schule wählen", 
+        schulen_liste, 
+        format_func=lambda x: f"{x['name']} ({x['id']})"
+    )
+
     st.divider()
+    start_search = st.button("Recherche starten", type="primary")
+
+# --- HAUPTBEREICH ---
+if start_search and schule_obj:
     
-    # Wir definieren unsere Such-Strategie (wie im Prompt besprochen)
+    # 1. KEY INFO BLOCK (Stammdaten anzeigen)
+    st.subheader(f"Dossier: {schule_obj['name']}")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Bezirk", selected_bezirk)
+    col2.metric("Stadtteil", selected_stadtteil)
+    # Hier simulieren wir die 'Key Information' aus unserer Datenbank
+    col3.metric("Kennziffer / ID", schule_obj['id'], delta_color="off")
+    
+    st.info(f"📍 **Standort-Info:** Suchfokus liegt auf **{schule_obj['name']}** (ID: {schule_obj['id']}).")
+    
+    st.divider()
+
+    # 2. AUTOMATISIERTE SUCHE
+    # Wir nutzen Name UND ID für präzisere Ergebnisse
+    schul_query = f'"{schule_obj["name"]}" OR "{schule_obj["id"]}"'
+
     search_scenarios = [
         {
-            "Topic": "📜 Strategische Planung (SEPL)",
-            "Query": f'Schulentwicklungsplan "{bezirk}"',
-            "Info": "Sucht nach Schulentwicklungsplänen im Bezirk für Schülerzahlenprognosen."
+            "Icon": "📜",
+            "Topic": "Entwicklungsplanung (SEPL)",
+            # Suche nach SEPL im Bezirk, aber filtere gedanklich nach Relevanz
+            "Query": f'Schulentwicklungsplan "{selected_bezirk}"', 
+            "Help": "Zeigt generelle Planungen für den Bezirk."
         },
         {
-            "Topic": "🏗️ Baurecht & B-Pläne",
-            "Query": f'Bebauungsplan {strasse}' if strasse else f'Bebauungsplan "{bezirk}"',
-            "Info": "Prüft Baurecht und Festsetzungen für das Grundstück."
+            "Icon": "🏗️",
+            "Topic": "Objektbezogene Drucksachen & Bau",
+            # Hier ist die Schulkennziffer (ID) oft Gold wert in Drucksachen
+            "Query": f'{schul_query} Neubau OR Sanierung OR Drucksache', 
+            "Help": "Spezifische Beschlüsse zu dieser Schule."
         },
         {
-            "Topic": "🏛️ Politische Beschlüsse & Sanierung",
-            "Query": f'"{schul_name}" Sanierung OR Neubau OR Drucksache',
-            "Info": "Sucht nach Senatsdrucksachen, Budgetfreigaben oder politischen Anträgen."
-        },
-        {
-            "Topic": "☔ Umwelt & Risiken (Geodaten)",
-            "Query": f'Starkregengefahrenhinweiskarte OR Lärmkarte "{bezirk}"',
-            "Info": "Prüft auf Umweltfaktoren wie Starkregen oder Lärm."
+            "Icon": "🗺️",
+            "Topic": "Lage & Bebauungspläne",
+            "Query": f'Bebauungsplan "{selected_stadtteil}"',
+            "Help": "Baurecht im Stadtteil."
         }
     ]
 
-    # Iteration durch die Szenarien
+    # Anzeige der Ergebnisse
     for scenario in search_scenarios:
-        st.subheader(scenario["Topic"])
-        st.caption(f"Suchlogik: `{scenario['Query']}` | {scenario['Info']}")
-        
-        raw_results = query_transparenzportal(scenario["Query"])
-        
-        if raw_results:
-            df = pd.DataFrame(extract_key_info(raw_results))
+        with st.expander(f"{scenario['Icon']} {scenario['Topic']}", expanded=True):
+            st.caption(f"Suchbefehl: `{scenario['Query']}`")
             
-            # Wir bauen eine klickbare Tabelle (Data Editor ist interaktiv)
-            st.dataframe(
-                df,
-                column_config={
-                    "Link": st.column_config.LinkColumn("Dokument öffnen")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.warning("Keine direkten Treffer gefunden.")
+            raw_results = query_transparenzportal(scenario['Query'])
             
-    st.success("Recherche abgeschlossen.")
+            if raw_results:
+                df = pd.DataFrame(extract_docs(raw_results))
+                st.dataframe(
+                    df,
+                    column_config={
+                        "Link": st.column_config.LinkColumn("PDF öffnen")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+            else:
+                st.warning("Keine Dokumente im Transparenzportal gefunden.")
 
-else:
-    st.info("Bitte geben Sie links die Daten ein und klicken Sie auf 'Recherche starten'.")
+elif not start_search:
+    st.info("👈 Bitte wählen Sie links einen Standort aus.")
