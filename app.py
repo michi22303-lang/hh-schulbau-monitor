@@ -33,7 +33,7 @@ SCHUL_DATEN = {
                 "name": "Grundschule Mümmelmannsberg", 
                 "id": "5058", 
                 "students": "ca. 340", 
-                "address": "Mümmelmannsberg 52, 22115 Hamburg"
+                "address": "Mümmelmannsberg 54, 22115 Hamburg"
             }
         ]
     }
