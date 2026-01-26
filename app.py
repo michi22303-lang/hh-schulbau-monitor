@@ -27,6 +27,7 @@ SCHUL_DATEN = {
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 WMS_ALKIS = "https://geodienste.hamburg.de/HH_WMS_ALKIS"
 WMS_DOP = "https://geodienste.hamburg.de/HH_WMS_DOP" 
+WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
 
 # --- 3. HELFER ---
 @st.cache_data(show_spinner=False)
@@ -34,7 +35,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-Debug/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-App/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -80,64 +81,110 @@ with st.sidebar:
 # MAIN
 if schule_obj:
     adresse = schule_obj.get("address", "")
-    coords = get_coordinates(adresse)
     
-    # DEBUG-Info: Sehen wir überhaupt Koordinaten?
-    if coords:
-        st.success(f"Koordinaten gefunden: {coords}")
-    else:
-        coords = [53.550, 9.992]
-        st.error(f"Keine Koordinaten für '{adresse}' gefunden. Zeige Rathaus.")
+    # Koordinaten holen
+    coords = get_coordinates(adresse)
+    if not coords:
+        coords = [53.550, 9.992] # Fallback Rathaus
+        st.sidebar.warning("Adresse nicht gefunden. Zeige Fallback (Rathaus).")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Schülerzahl", schule_obj.get('students', '-'))
-    col2.metric("Adresse", adresse)
+    # Header Metrics
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Bezirk / Stadtteil", f"{selected_bezirk} / {selected_stadtteil}")
+    col2.metric("Kennziffer", schule_obj.get('id', '-'))
+    col3.metric("Schülerzahl", schule_obj.get('students', '-'))
+    col4.metric("Adresse", adresse)
     
     st.markdown("---")
-    
-    # --- KARTE JETZT AUSSERHALB DER TABS ---
-    st.subheader("🗺️ Lage & Kataster")
-    
-    # 1. Grundkarte mit Standard-Tiles (damit man immer WAS sieht)
-    m = folium.Map(location=coords, zoom_start=19, tiles="OpenStreetMap")
 
-    # 2. Hamburger Luftbilder (DOP)
-    folium.WmsTileLayer(
-        url=WMS_DOP,
-        layers="DOP",
-        fmt="image/jpeg",
-        name="Hamburg Luftbild",
-        attr="Geoportal Hamburg",
-        overlay=False, # Als Basis-Layer (umschaltbar)
-        control=True
-    ).add_to(m)
+    # TABS WIEDERHERGESTELLT
+    tab_map, tab_docs = st.tabs(["🗺️ Kataster & Luftbild", "📂 Dokumente & Planung"])
 
-    # 3. ALKIS (Kataster)
-    folium.WmsTileLayer(
-        url=WMS_ALKIS,
-        layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude",
-        fmt="image/png",
-        transparent=True,
-        name="ALKIS Kataster",
-        attr="Geoportal Hamburg",
-        overlay=True,
-        control=True
-    ).add_to(m)
+    # --- TAB 1: KARTE ---
+    with tab_map:
+        col_map, col_info = st.columns([3, 1])
+        
+        with col_map:
+            # Karte initialisieren
+            m = folium.Map(location=coords, zoom_start=19, tiles="OpenStreetMap")
 
-    folium.Marker(coords, popup=schule_obj['name'], icon=folium.Icon(color="red", icon="home")).add_to(m)
-    folium.LayerControl().add_to(m)
+            # 1. Stadtplan (Grau) - Oft klarer als OSM
+            folium.WmsTileLayer(
+                url=WMS_STADTPLAN,
+                layers="stadtplan_grau",
+                fmt="image/png",
+                name="Stadtplan (Grau)",
+                attr="Geoportal Hamburg",
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-    # WICHTIG: width=100% kann manchmal Probleme machen, use_container_width=True ist besser
-    st_folium(m, height=500, use_container_width=True)
+            # 2. Luftbild (KORRIGIERT: Layer Name angepasst!)
+            folium.WmsTileLayer(
+                url=WMS_DOP,
+                layers="dop_zeitreihe_belaubt", # <--- Das ist der korrekte Layer-Name für "Bilder"
+                fmt="image/jpeg",
+                name="Luftbild (Sommer)",
+                attr="Geoportal Hamburg",
+                overlay=False,
+                control=True
+            ).add_to(m)
 
-    # --- DOKUMENTE ---
-    st.subheader("📂 Dokumente")
-    schul_query = f'"{schule_obj["name"]}" OR "{schule_obj["id"]}"'
-    
-    if st.button("Dokumente suchen"):
-        with st.spinner("Suche..."):
-            raw = query_transparenzportal(schul_query)
-            if raw:
-                st.dataframe(pd.DataFrame(extract_docs(raw)), use_container_width=True)
-            else:
-                st.warning("Keine Dokumente gefunden.")
+            # 3. ALKIS (Kataster Overlay)
+            folium.WmsTileLayer(
+                url=WMS_ALKIS,
+                layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude",
+                fmt="image/png",
+                transparent=True,
+                name="ALKIS Kataster",
+                attr="Geoportal Hamburg",
+                overlay=True,
+                control=True
+            ).add_to(m)
+
+            # Marker und Controls
+            folium.Marker(coords, popup=schule_obj['name'], icon=folium.Icon(color="red", icon="home")).add_to(m)
+            folium.LayerControl().add_to(m)
+
+            # Karte anzeigen
+            st_folium(m, height=600, use_container_width=True)
+
+        with col_info:
+            st.info("ℹ️ **Ebenen steuern**")
+            st.markdown("""
+            Nutzen Sie das **Layer-Symbol** (oben rechts in der Karte), um zwischen:
+            * Stadtplan
+            * Luftbild
+            
+            umzuschalten. ALKIS (schwarze Linien) liegt transparent darüber.
+            """)
+            st.link_button("↗️ Zu Geo-Online Hamburg", "https://geoportal-hamburg.de/geo-online/")
+
+    # --- TAB 2: DOKUMENTE ---
+    with tab_docs:
+        schul_query = f'"{schule_obj["name"]}" OR "{schule_obj["id"]}"'
+        search_scenarios = [
+            {"Icon": "📜", "Topic": "SEPL", "Query": f'Schulentwicklungsplan "{selected_bezirk}"'},
+            {"Icon": "🏗️", "Topic": "Bau & Drucksachen", "Query": f'{schul_query} Neubau OR Sanierung OR Drucksache'},
+            {"Icon": "⚖️", "Topic": "B-Pläne", "Query": f'Bebauungsplan "{selected_stadtteil}"'}
+        ]
+
+        st.caption(f"Suche nach Dokumenten für: **{schule_obj['name']}**")
+        
+        for scenario in search_scenarios:
+            with st.expander(f"{scenario['Icon']} {scenario['Topic']}", expanded=False):
+                # Button verhindert automatische (teure) Suche bei jedem Klick, wenn man will
+                # Hier direktes Laden beim Öffnen des Expanders simulieren wir einfach durch Ausführen:
+                with st.spinner("Lade Daten..."):
+                    raw = query_transparenzportal(scenario['Query'])
+                
+                if raw:
+                    df = pd.DataFrame(extract_docs(raw))
+                    st.dataframe(
+                        df, 
+                        column_config={"Link": st.column_config.LinkColumn("PDF Download")}, 
+                        hide_index=True, 
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Keine Dokumente im Transparenzportal gefunden.")
