@@ -19,20 +19,22 @@ SCHUL_DATEN = {
 }
 
 STADTTEIL_INFOS = {
-    "Othmarschen": "Wohlhabender Elbvorort, geprägt durch Villenbebauung. Geringe Dichte.",
+    "Othmarschen": "Wohlhabender Elbvorort, geprägt durch Villenbebauung.",
     "Kirchwerder": "Ländlich, Teil der Vierlande. Fokus auf Landwirtschaft.",
     "Billstedt": "Dicht besiedelt, hoher Geschosswohnungsbau, multikulturell."
 }
 
-# --- 2. APIS & URLs (Die stabilen Versionen) ---
+# --- 2. APIs ---
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 API_URL_WEATHER = "https://api.open-meteo.com/v1/forecast"
 
-# HIER LIEGT DER TRICK: Wir nutzen den "Stadtplan" WMS, der ist extrem stabil!
-# Er enthält ALKIS-Daten (Hausnummern, Grenzen), lädt aber zuverlässig.
-WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
+# NEU: OGC API Features (Vektordaten für Schulimmobilien)
+# Basis-URL für die Urban Data Platform Hamburg
+API_OGC_SCHULE = "https://api.hamburg.de/datasets/v1/bsb_sonderverm_schulimmobilien/collections/bsb_sonderverm_schulimmobilien/items"
+API_OGC_ERBBAU = "https://api.hamburg.de/datasets/v1/bsb_sonderverm_schulimmobilien/collections/bsb_sonderverm_schulimmobilien_erbbaurecht/items"
 
-# Fachdaten
+# WMS Dienste (Bilder)
+WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
 WMS_LAERM = "https://geodienste.hamburg.de/HH_WMS_Strassenlaerm_2017"
 WMS_SOLAR = "https://geodienste.hamburg.de/HH_WMS_Solaratlas"
 WMS_HOCHWASSER = "https://geodienste.hamburg.de/HH_WMS_Ueberschwemmungsgebiete"
@@ -43,7 +45,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-V13/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-V14/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -60,13 +62,41 @@ def get_weather_data(lat, lon):
     except: return None
 
 def calculate_distance(lat, lon):
-    # Haversine
     R = 6373.0
     lat1, lon1 = radians(53.550), radians(9.992)
     lat2, lon2 = radians(lat), radians(lon)
     a = sin((lat2-lat1)/2)**2 + cos(lat1) * cos(lat2) * sin((lon2-lon1)/2)**2
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
+
+# NEU: Funktion um echte Schulgrenzen (Polygone) zu laden
+@st.cache_data(show_spinner=False)
+def get_school_property_geojson(lat, lon):
+    # Wir bauen eine kleine Bounding Box (Suchfenster) um die Koordinate
+    # ca. 200m Umkreis
+    delta = 0.002 
+    bbox = f"{lon-delta},{lat-delta},{lon+delta},{lat+delta}"
+    
+    params = {
+        "bbox": bbox,
+        "limit": 10  # Wir wollen nur Objekte in der Nähe
+    }
+    
+    # 1. Normale Schulimmobilien abfragen
+    try:
+        r = requests.get(API_OGC_SCHULE, params=params, timeout=5)
+        data_normal = r.json()
+    except:
+        data_normal = None
+
+    # 2. Erbbaurecht abfragen
+    try:
+        r = requests.get(API_OGC_ERBBAU, params=params, timeout=5)
+        data_erbbau = r.json()
+    except:
+        data_erbbau = None
+        
+    return data_normal, data_erbbau
 
 def query_transparenzportal(search_term, limit=5):
     try:
@@ -86,8 +116,8 @@ def extract_docs(results):
         cleaned.append({"Dokument": item.get("title"), "Datum": item.get("metadata_modified", "")[:10], "Link": link})
     return cleaned
 
-# --- 4. UI ---
-st.set_page_config(page_title="HH Schulbau Monitor V13", layout="wide", page_icon="🏫")
+# --- 4. UI SETUP ---
+st.set_page_config(page_title="HH Schulbau Monitor V14", layout="wide", page_icon="🏫")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # --- 5. SIDEBAR ---
@@ -101,17 +131,16 @@ with st.sidebar:
     st.markdown("---")
     st.header("Layer-Steuerung")
     
-    # Karte
     map_style = st.radio("Hintergrund:", ("Planung (Grau)", "Straßen (OSM)", "Satellit"), index=0)
     
-    # Overlays
-    st.caption("Technische Overlays")
-    # Wir nennen es "Kataster", laden aber technisch den stabilen Schwarz-Weiß-Plan
-    show_alkis = st.checkbox("📐 Kataster & Nummern", value=True, help="Zeigt Grundstücksgrenzen und Hausnummern (High-Res)")
-    show_transit = st.checkbox("🚆 Bahn & ÖPNV", value=True)
-    show_radius = st.checkbox("⭕ 1km Radius", value=True)
+    st.caption("Eigentum & Kataster")
+    # Das ist das neue Feature!
+    show_real_property = st.checkbox("🟦 Amtliches Schulgrundstück", value=True, help="Zeigt die exakte, amtliche Fläche der Schulimmobilie (blau)")
+    show_alkis = st.checkbox("📐 Flurstücke (ALKIS)", value=True)
     
-    st.caption("Umwelt & Risiken")
+    st.caption("Umwelt & Analyse")
+    show_transit = st.checkbox("🚆 ÖPNV", value=True)
+    show_radius = st.checkbox("⭕ 1km Radius", value=False)
     show_laerm = st.checkbox("🔊 Straßenlärm", value=False)
     show_flood = st.checkbox("🌊 Hochwasser", value=False)
     
@@ -120,21 +149,27 @@ with st.sidebar:
 # --- 6. MAIN ---
 if schule_obj:
     coords = get_coordinates(schule_obj["address"])
-    if not coords: coords = [53.550, 9.992]; st.warning("Fallback Koordinaten (Rathaus).")
+    if not coords: coords = [53.550, 9.992]; st.warning("Fallback Koordinaten.")
 
-    # Header
+    # Daten laden (OGC API)
+    geo_normal, geo_erbbau = get_school_property_geojson(coords[0], coords[1])
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Bezirk", sel_bez)
     c2.metric("Schüler", schule_obj["students"])
     c3.metric("Distanz Zentrum", f"{calculate_distance(coords[0], coords[1]):.1f} km")
-    c4.metric("KESS-Index", f"{schule_obj['kess']}/6")
+    
+    # Checken ob wir Daten gefunden haben für das Metric-Feld
+    prop_count = 0
+    if geo_normal: prop_count += len(geo_normal.get('features', []))
+    if geo_erbbau: prop_count += len(geo_erbbau.get('features', []))
+    
+    c4.metric("Grundstücks-Teile", prop_count, help="Anzahl der gefundenen amtlichen Schul-Flurstücke")
     
     st.markdown("---")
     
-    # TABS
-    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Planung", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
+    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Eigentum", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
 
-    # --- TAB 1: HAUPTKARTE ---
     with tab_map:
         # Basis
         if map_style == "Straßen (OSM)":
@@ -143,123 +178,92 @@ if schule_obj:
             m = folium.Map(location=coords, zoom_start=18, tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr="Esri")
             folium.TileLayer(tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", attr="Esri Ref", overlay=True, name="Labels").add_to(m)
         else:
-            # CartoDB Positron ist super clean für Planungszwecke
             m = folium.Map(location=coords, zoom_start=18, tiles="cartodbpositron", attr="CartoDB")
 
-        # 1. ALKIS ALTERNATIVE (Der "Stabile" Layer)
+        # 1. NEU: Amtliche Schulgrundstücke (Vektordaten)
+        if show_real_property:
+            # Normale Schulimmobilien (Blau)
+            if geo_normal and len(geo_normal.get('features', [])) > 0:
+                folium.GeoJson(
+                    geo_normal,
+                    name="Schulimmobilien (SBH)",
+                    style_function=lambda x: {
+                        'fillColor': '#0033cc', # Dunkelblau
+                        'color': '#0033cc',
+                        'weight': 2,
+                        'fillOpacity': 0.3
+                    },
+                    tooltip=folium.GeoJsonTooltip(fields=['id'], aliases=['Objekt-ID:'])
+                ).add_to(m)
+            
+            # Erbbaurecht (Orange)
+            if geo_erbbau and len(geo_erbbau.get('features', [])) > 0:
+                folium.GeoJson(
+                    geo_erbbau,
+                    name="Erbbaurecht (SBH)",
+                    style_function=lambda x: {
+                        'fillColor': '#ff9900', # Orange
+                        'color': '#ff9900',
+                        'weight': 2,
+                        'fillOpacity': 0.4,
+                        'dashArray': '5, 5' # Gestrichelt
+                    },
+                    tooltip="Erbbaurecht"
+                ).add_to(m)
+
+        # 2. ALKIS (Schwarzplan)
         if show_alkis:
-            # Wir nutzen hier den "Stadtplan Schwarz-Weiß" als Overlay. 
-            # Der enthält alle Grenzen, ist aber technisch robuster als das rohe ALKIS-WMS.
             folium.WmsTileLayer(
-                url=WMS_STADTPLAN,
-                layers="schwarzweiss", # Das ist der Geheimtipp!
-                fmt="image/png",
-                transparent=True,
-                name="Kataster (Plan)",
-                attr="Geoportal Hamburg",
-                overlay=True,
-                opacity=0.7
+                url=WMS_STADTPLAN, layers="schwarzweiss", fmt="image/png", transparent=True, 
+                name="Kataster (Plan)", attr="Geoportal HH", overlay=True, opacity=0.6
             ).add_to(m)
 
-        # 2. ÖPNV
+        # 3. Weitere Layer
         if show_transit:
             folium.TileLayer(tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png", attr="OpenRailwayMap", overlay=True).add_to(m)
-
-        # 3. LÄRM (Mit korrigiertem Layer-Namen)
         if show_laerm:
-            folium.WmsTileLayer(
-                url=WMS_LAERM,
-                layers="laerm_str_lden", # L-den = Lärm Day-Evening-Night (24h)
-                fmt="image/png",
-                transparent=True,
-                opacity=0.6,
-                name="Straßenlärm",
-                attr="Geoportal Hamburg",
-                overlay=True
-            ).add_to(m)
-
-        # 4. HOCHWASSER
+            folium.WmsTileLayer(url=WMS_LAERM, layers="laerm_str_lden", fmt="image/png", transparent=True, opacity=0.6, name="Lärm", attr="HH", overlay=True).add_to(m)
         if show_flood:
-             folium.WmsTileLayer(
-                url=WMS_HOCHWASSER,
-                layers="ueberschwemmungsgebiete",
-                fmt="image/png",
-                transparent=True,
-                opacity=0.5,
-                name="Hochwasser",
-                attr="Geoportal Hamburg",
-                overlay=True
-            ).add_to(m)
-
-        # 5. Radius
+             folium.WmsTileLayer(url=WMS_HOCHWASSER, layers="ueberschwemmungsgebiete", fmt="image/png", transparent=True, opacity=0.5, name="Hochwasser", attr="HH", overlay=True).add_to(m)
         if show_radius:
             folium.Circle(radius=1000, location=coords, color="#3186cc", fill=True, fill_opacity=0.05).add_to(m)
 
-        # Marker
         folium.Marker(coords, popup=schule_obj["name"], icon=folium.Icon(color="red", icon="graduation-cap", prefix="fa")).add_to(m)
         
-        st_folium(m, height=600, use_container_width=True, key=f"main_{schule_obj['id']}_{map_style}_{show_alkis}_{show_laerm}")
+        st_folium(m, height=600, use_container_width=True, key=f"map_v14_{schule_obj['id']}_{map_style}_{show_real_property}")
         
-        st.caption("Hinweis: Wenn 'Kataster' aktiv ist, sehen Sie Grundstücksgrenzen und Hausnummern durch den Hamburger 'Schwarzplan'.")
+        # Legende für das neue Feature
+        if show_real_property:
+            st.info("🟦 **Blaue Flächen:** Amtliches Sondervermögen Schulimmobilien | 🟧 **Orange:** Erbbaurecht")
 
-    # --- TAB 2: SOLAR ---
     with tab_solar:
         col_s1, col_s2 = st.columns([3,1])
         with col_s1:
             m_solar = folium.Map(location=coords, zoom_start=19, tiles="cartodbpositron")
-            # Luftbild drunter
             folium.TileLayer(tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr="Esri", overlay=False).add_to(m_solar)
-            
-            # Solar Layer (Korrigiert)
-            folium.WmsTileLayer(
-                url=WMS_SOLAR,
-                # Oft heißen die Layer "solar_potenzial_dach" oder "klasse_dachflaechen"
-                # Wir probieren den gängigsten:
-                layers="solarpotenzial_dach", 
-                fmt="image/png",
-                transparent=True,
-                opacity=0.8,
-                name="Solarpotenzial",
-                attr="Geoportal Hamburg",
-                overlay=True
-            ).add_to(m_solar)
-            
+            folium.WmsTileLayer(url=WMS_SOLAR, layers="solarpotenzial_dach", fmt="image/png", transparent=True, opacity=0.8, name="Solar", attr="Geoportal HH", overlay=True).add_to(m_solar)
             st_folium(m_solar, height=500, use_container_width=True, key="solar_view")
-        
         with col_s2:
-            st.info("Legende Solareignung")
-            st.markdown("""
-            🔴 **Sehr hoch** (Süd)
-            🟠 **Hoch** (Ost/West)
-            🟡 **Mittel**
-            ⚪ **Gering/Keine**
-            
-            *Datenquelle: Hamburger Solaratlas*
-            """)
+            st.markdown("🔴 Sehr gut\n🟠 Gut\n🟡 Mittel")
 
-    # --- TAB 3: UMFELD ---
     with tab_info:
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Wetter & Klima")
+            st.subheader("Wetter")
             w = get_weather_data(coords[0], coords[1])
-            if w:
-                st.metric("Temp", f"{w['temperature']} °C", f"Wind: {w['windspeed']} km/h")
-            else: st.warning("Wetter-API Timeout")
-            
+            if w: st.metric("Temp", f"{w['temperature']} °C", f"Wind: {w['windspeed']} km/h")
         with c2:
-            st.subheader("Stadtteil-Profil")
-            st.markdown(f"**{sel_stadt}:** {STADTTEIL_INFOS.get(sel_stadt, '-')}")
+            st.subheader("Profil")
+            st.markdown(f"**{sel_stadt}**")
             st.progress(schule_obj['kess']/6)
-            st.caption("KESS-Faktor (Sozialindex)")
+            st.caption("KESS (Sozialindex)")
 
-    # --- TAB 4: DOKUMENTE ---
     with tab_docs:
         q_name = f'"{schule_obj["name"]}" OR "{schule_obj["id"]}"'
         scenarios = [
             {"Topic": "Schulentwicklungsplan", "Q": f'Schulentwicklungsplan "{sel_bez}"'},
             {"Topic": "Bau & Sanierung", "Q": f'{q_name} Neubau OR Sanierung'},
-            {"Topic": "Finanzen & Zuwendung", "Q": f'{q_name} Zuwendung'}
+            {"Topic": "Finanzen", "Q": f'{q_name} Zuwendung'}
         ]
         for s in scenarios:
             with st.expander(f"🔎 {s['Topic']}", expanded=False):
