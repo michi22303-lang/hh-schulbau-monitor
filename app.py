@@ -35,7 +35,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-App/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-Final/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -86,7 +86,7 @@ if schule_obj:
     coords = get_coordinates(adresse)
     if not coords:
         coords = [53.550, 9.992] # Fallback Rathaus
-        st.sidebar.warning("Adresse nicht gefunden. Zeige Fallback (Rathaus).")
+        st.sidebar.warning("Adresse nicht gefunden. Zeige Fallback.")
 
     # Header Metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -97,7 +97,7 @@ if schule_obj:
     
     st.markdown("---")
 
-    # TABS WIEDERHERGESTELLT
+    # TABS
     tab_map, tab_docs = st.tabs(["🗺️ Kataster & Luftbild", "📂 Dokumente & Planung"])
 
     # --- TAB 1: KARTE ---
@@ -105,58 +105,76 @@ if schule_obj:
         col_map, col_info = st.columns([3, 1])
         
         with col_map:
-            # Karte initialisieren
-            m = folium.Map(location=coords, zoom_start=19, tiles="OpenStreetMap")
+            # WICHTIG: tiles=None verhindert, dass OSM als Standard gesetzt wird
+            # Das ist der Schlüssel zum sauberen Umschalten!
+            m = folium.Map(location=coords, zoom_start=19, tiles=None)
 
-            # 1. Stadtplan (Grau) - Oft klarer als OSM
+            # --- BASIS-LAYER (Radio Buttons) ---
+            # Alle layer hier müssen overlay=False haben!
+            
+            # 1. Stadtplan (Grau) - Als Standard
             folium.WmsTileLayer(
                 url=WMS_STADTPLAN,
                 layers="stadtplan_grau",
                 fmt="image/png",
                 name="Stadtplan (Grau)",
                 attr="Geoportal Hamburg",
-                overlay=False,
+                overlay=False,  # WICHTIG: False = Basis-Layer
                 control=True
             ).add_to(m)
 
-            # 2. Luftbild (KORRIGIERT: Layer Name angepasst!)
+            # 2. Luftbild
             folium.WmsTileLayer(
                 url=WMS_DOP,
-                layers="dop_zeitreihe_belaubt", # <--- Das ist der korrekte Layer-Name für "Bilder"
+                layers="dop_zeitreihe_belaubt",
                 fmt="image/jpeg",
-                name="Luftbild (Sommer)",
+                name="Luftbild (Foto)",
                 attr="Geoportal Hamburg",
-                overlay=False,
+                overlay=False,  # WICHTIG: False = Basis-Layer
                 control=True
             ).add_to(m)
 
-            # 3. ALKIS (Kataster Overlay)
+            # 3. OpenStreetMap (als Alternative)
+            folium.TileLayer(
+                "OpenStreetMap",
+                name="OpenStreetMap",
+                overlay=False   # WICHTIG: False = Basis-Layer
+            ).add_to(m)
+
+            # --- OVERLAYS (Checkboxen) ---
+            
+            # 4. ALKIS (Kataster)
             folium.WmsTileLayer(
                 url=WMS_ALKIS,
                 layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude",
                 fmt="image/png",
                 transparent=True,
-                name="ALKIS Kataster",
+                name="ALKIS (Grenzen & Nummern)",
                 attr="Geoportal Hamburg",
-                overlay=True,
+                overlay=True,   # WICHTIG: True = Legt sich drüber
                 control=True
             ).add_to(m)
 
-            # Marker und Controls
+            # Marker
             folium.Marker(coords, popup=schule_obj['name'], icon=folium.Icon(color="red", icon="home")).add_to(m)
-            folium.LayerControl().add_to(m)
+            
+            # Layer Control hinzufügen (generiert das Menü)
+            folium.LayerControl(collapsed=False).add_to(m)
 
-            # Karte anzeigen
             st_folium(m, height=600, use_container_width=True)
 
         with col_info:
             st.info("ℹ️ **Ebenen steuern**")
             st.markdown("""
-            Nutzen Sie das **Layer-Symbol** (oben rechts in der Karte), um zwischen:
-            * Stadtplan
-            * Luftbild
+            Das Menü oben rechts in der Karte unterscheidet nun:
             
-            umzuschalten. ALKIS (schwarze Linien) liegt transparent darüber.
+            **Basiskarten (Auswahl 1 aus 3):**
+            * ⚪ Stadtplan
+            * ⚪ Luftbild
+            * ⚪ OpenStreetMap
+            
+            **Überlagerung:**
+            * ☑️ ALKIS (Kataster)
             """)
             st.link_button("↗️ Zu Geo-Online Hamburg", "https://geoportal-hamburg.de/geo-online/")
 
@@ -173,8 +191,6 @@ if schule_obj:
         
         for scenario in search_scenarios:
             with st.expander(f"{scenario['Icon']} {scenario['Topic']}", expanded=False):
-                # Button verhindert automatische (teure) Suche bei jedem Klick, wenn man will
-                # Hier direktes Laden beim Öffnen des Expanders simulieren wir einfach durch Ausführen:
                 with st.spinner("Lade Daten..."):
                     raw = query_transparenzportal(scenario['Query'])
                 
