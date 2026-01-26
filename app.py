@@ -28,12 +28,11 @@ STADTTEIL_INFOS = {
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 API_URL_WEATHER = "https://api.open-meteo.com/v1/forecast"
 
-# HIER IST DER FIX: Wir nutzen den WFS Dienst direkt. 
-# Der Layername ist exakt der, den du gefunden hast: 'bsb_sonderverm_schulimmobilien'
-# URL: Wir nutzen den Geodienst für Schulimmobilien
-WFS_SCHULE_URL = "https://geodienste.hamburg.de/HH_WFS_Schulimmobilien"
+# HIER IST DIE KORREKTE URL (basierend auf deinem Fund!)
+# Dataset: bsb_sonderverm_schulimmobilien
+API_OGC_BASE = "https://api.hamburg.de/datasets/v1/bsb_sonderverm_schulimmobilien/collections"
 
-# WMS Dienste (Bilder)
+# WMS Dienste (Hintergrundbilder)
 WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
 WMS_LAERM = "https://geodienste.hamburg.de/HH_WMS_Strassenlaerm_2017"
 WMS_SOLAR = "https://geodienste.hamburg.de/HH_WMS_Solaratlas"
@@ -45,7 +44,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-V15/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-V16/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -69,39 +68,39 @@ def calculate_distance(lat, lon):
     c = 2 * atan2(sqrt(a), sqrt(1-a))
     return R * c
 
-# --- NEUE FUNKTION: WFS ABFRAGE MIT KOORDINATEN-ÜBERSETZUNG ---
+# --- NEUE FUNKTION: OGC API (Die korrigierte Version) ---
 @st.cache_data(show_spinner=False)
-def get_school_property_wfs(lat, lon):
-    # Radius für die Bounding Box (ca. 300m)
-    delta = 0.003
-    # WICHTIG: Folium nutzt Lon/Lat (x/y) für die Box
+def get_school_vectors(lat, lon):
+    # Wir bauen die URL exakt so auf, wie die OGC API es will:
+    # /collections/{collectionId}/items
+    
+    url_normal = f"{API_OGC_BASE}/bsb_sonderverm_schulimmobilien/items"
+    
+    # Radius (Bounding Box) etwas größer machen, damit wir das Grundstück sicher treffen
+    delta = 0.002 # ca 200m
     bbox = f"{lon-delta},{lat-delta},{lon+delta},{lat+delta}"
     
-    # Parameter für den WFS Request
     params = {
-        "SERVICE": "WFS",
-        "VERSION": "2.0.0",
-        "REQUEST": "GetFeature",
-        "TYPENAMES": "bsb_sonderverm_schulimmobilien", # Dein Layer!
-        "OUTPUTFORMAT": "application/geo+json",
-        "SRSNAME": "EPSG:4326", # ZWINGT DEN SERVER ZU GPS KOORDINATEN
-        "BBOX": f"{bbox},EPSG:4326"
+        "bbox": bbox,
+        "limit": 5, # Nimm die nächsten 5 Treffer
+        "f": "json" # Format erzwingen
     }
     
-    debug_url = ""
+    debug_info = ""
     try:
-        req = requests.Request('GET', WFS_SCHULE_URL, params=params)
+        # Request vorbereiten für Debugger
+        req = requests.Request('GET', url_normal, params=params)
         prep = req.prepare()
-        debug_url = prep.url # Für den Debugger speichern
+        debug_info = prep.url
         
-        r = requests.Session().send(prep, timeout=10)
+        r = requests.Session().send(prep, timeout=8)
         
         if r.status_code == 200:
-            return r.json(), debug_url
+            return r.json(), debug_info
+        else:
+            return None, debug_info + f" (Status: {r.status_code})"
     except Exception as e:
-        return None, str(e)
-        
-    return None, debug_url
+        return None, debug_info + f" (Error: {str(e)})"
 
 def query_transparenzportal(search_term, limit=5):
     try:
@@ -122,7 +121,7 @@ def extract_docs(results):
     return cleaned
 
 # --- 4. UI SETUP ---
-st.set_page_config(page_title="HH Schulbau Monitor V15", layout="wide", page_icon="🏫")
+st.set_page_config(page_title="HH Schulbau Monitor V16", layout="wide", page_icon="🏫")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # --- 5. SIDEBAR ---
@@ -134,15 +133,15 @@ with st.sidebar:
     schule_obj = st.selectbox("Schule", SCHUL_DATEN[sel_bez][sel_stadt], format_func=lambda x: f"{x['name']}")
     
     st.markdown("---")
-    st.header("Layer-Steuerung")
+    st.header("Layer")
     
     map_style = st.radio("Hintergrund:", ("Planung (Grau)", "Straßen (OSM)", "Satellit"), index=0)
     
-    st.caption("Eigentum (Vektor)")
-    show_real_property = st.checkbox("🟦 Schulgrundstück (SBH)", value=True, help="Lädt echte Polygone vom 'Sondervermögen Schulimmobilien'")
+    st.caption("Eigentum")
+    show_real_property = st.checkbox("🟦 Schulgrundstück (Vektor)", value=True)
     
-    st.caption("Overlays (Bilder)")
-    show_alkis = st.checkbox("📐 Kataster (Schwarzplan)", value=True)
+    st.caption("Bild-Overlays")
+    show_alkis = st.checkbox("📐 Kataster (Plan)", value=True)
     show_transit = st.checkbox("🚆 ÖPNV", value=True)
     show_radius = st.checkbox("⭕ 1km Radius", value=False)
     show_laerm = st.checkbox("🔊 Straßenlärm", value=False)
@@ -154,19 +153,19 @@ if schule_obj:
     coords = get_coordinates(schule_obj["address"])
     if not coords: coords = [53.550, 9.992]; st.warning("Fallback Koordinaten.")
 
-    # WFS Vektordaten laden
-    geo_data, debug_url = get_school_property_wfs(coords[0], coords[1])
+    # API Abfrage
+    geo_data, debug_url = get_school_vectors(coords[0], coords[1])
     
+    # Feature Count prüfen
+    found_features = 0
+    if geo_data and 'features' in geo_data:
+        found_features = len(geo_data['features'])
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Bezirk", sel_bez)
     c2.metric("Schüler", schule_obj["students"])
-    
-    # Anzahl der gefundenen Grundstücke
-    feature_count = 0
-    if geo_data and 'features' in geo_data:
-        feature_count = len(geo_data['features'])
-    
-    c3.metric("Grundstücke (Vektor)", feature_count)
+    # Anzeige, ob wir echte Vektordaten gefunden haben
+    c3.metric("Grundstücke gefunden", found_features)
     c4.metric("Distanz Zentrum", f"{calculate_distance(coords[0], coords[1]):.1f} km")
     
     st.markdown("---")
@@ -174,7 +173,6 @@ if schule_obj:
     tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Eigentum", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
 
     with tab_map:
-        # Basis
         if map_style == "Straßen (OSM)":
             m = folium.Map(location=coords, zoom_start=18, tiles="OpenStreetMap")
         elif map_style == "Satellit":
@@ -183,29 +181,28 @@ if schule_obj:
         else:
             m = folium.Map(location=coords, zoom_start=18, tiles="cartodbpositron", attr="CartoDB")
 
-        # 1. NEU: Vektordaten (Polygon)
-        if show_real_property:
-            if feature_count > 0:
-                folium.GeoJson(
-                    geo_data,
-                    name="Schulimmobilien",
-                    style_function=lambda x: {
-                        'fillColor': '#0033cc', # Blau
-                        'color': '#0033cc',
-                        'weight': 3,
-                        'fillOpacity': 0.3
-                    },
-                    tooltip=folium.GeoJsonTooltip(fields=['flurstueckskennzeichen'], aliases=['Flurstück:'], localize=True)
-                ).add_to(m)
-            else:
-                # Falls keine Daten da sind, zeigen wir eine Warnung
-                st.toast("Keine Vektordaten an dieser Koordinate gefunden.", icon="⚠️")
+        # 1. VEKTOR DATEN (Blau)
+        if show_real_property and found_features > 0:
+            folium.GeoJson(
+                geo_data,
+                name="Schulimmobilien (Vektor)",
+                style_function=lambda x: {
+                    'fillColor': '#0044ff', 
+                    'color': '#0044ff',
+                    'weight': 3,
+                    'fillOpacity': 0.4
+                },
+                tooltip=folium.GeoJsonTooltip(fields=['id'], aliases=['Objekt ID:'])
+            ).add_to(m)
+        elif show_real_property and found_features == 0:
+            # Falls API leer -> Toast Nachricht
+            st.toast("Kein exaktes Schulgrundstück an dieser Koordinate gefunden. Zeige Kataster-Plan.", icon="ℹ️")
 
-        # 2. ALKIS (Schwarzplan)
-        if show_alkis:
+        # 2. ALKIS (Schwarzplan) - Immer laden wenn aktiv (oder als Fallback wenn Vektor fehlt)
+        if show_alkis or (show_real_property and found_features == 0):
             folium.WmsTileLayer(
                 url=WMS_STADTPLAN, layers="schwarzweiss", fmt="image/png", transparent=True, 
-                name="Kataster", attr="HH", overlay=True, opacity=0.6
+                name="Kataster", attr="HH", overlay=True, opacity=0.7
             ).add_to(m)
 
         # 3. Overlays
@@ -218,9 +215,11 @@ if schule_obj:
 
         folium.Marker(coords, popup=schule_obj["name"], icon=folium.Icon(color="red", icon="graduation-cap", prefix="fa")).add_to(m)
         
-        st_folium(m, height=600, use_container_width=True, key=f"map_v15_{schule_obj['id']}_{map_style}_{show_real_property}")
+        st_folium(m, height=600, use_container_width=True, key=f"map_v16_{schule_obj['id']}_{map_style}_{show_real_property}")
+        
+        if show_real_property and found_features > 0:
+            st.info("ℹ️ Die **blaue Fläche** ist das amtlich vermessene Schulgrundstück (Quelle: OGC API Hamburg).")
 
-    # ... (Rest der Tabs bleibt gleich wie V13/14) ...
     with tab_solar:
         col_s1, col_s2 = st.columns([3,1])
         with col_s1:
@@ -250,8 +249,8 @@ if schule_obj:
                 data = query_transparenzportal(s['Q'])
                 if data: st.dataframe(pd.DataFrame(extract_docs(data)), hide_index=True)
 
-# --- 7. DEBUGGER (Ganz unten) ---
-with st.expander("🔧 Tech-Debugger (Falls Vektordaten fehlen)"):
-    st.write("Diese URL wird an den Hamburger Server gesendet:")
+# --- 7. DEBUGGER (Für den Notfall) ---
+with st.expander("🔧 Tech-Debugger (URL Test)"):
+    st.write("Die App ruft jetzt diesen Link auf:")
     st.code(debug_url)
-    st.write("Kopiere diesen Link in den Browser. Wenn dort 'FeatureCollection' steht, kommen Daten. Wenn er leer ist, ist die BoundingBox leer.")
+    st.write("Wenn dieser Link im Browser ein JSON (Text) liefert, funktioniert die API.")
