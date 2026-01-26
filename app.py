@@ -25,9 +25,8 @@ SCHUL_DATEN = {
 
 # --- 2. API URLs ---
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
+# Nur noch für die Linien (ALKIS) nutzen wir Hamburg, Bilder kommen jetzt global
 WMS_ALKIS = "https://geodienste.hamburg.de/HH_WMS_ALKIS"
-WMS_DOP = "https://geodienste.hamburg.de/HH_WMS_DOP" 
-WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
 
 # --- 3. HELFER ---
 @st.cache_data(show_spinner=False)
@@ -35,7 +34,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-Fixed/2.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-Stable/3.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -65,7 +64,7 @@ def extract_docs(results):
     return cleaned
 
 # --- 4. UI ---
-st.set_page_config(page_title="HH Schulbau Monitor V6", layout="wide")
+st.set_page_config(page_title="HH Schulbau Monitor V7", layout="wide")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # Sidebar
@@ -79,7 +78,7 @@ with st.sidebar:
     schule_obj = st.selectbox("3. Schule", schulen_liste, format_func=lambda x: f"{x['name']} ({x['id']})")
     
     st.divider()
-    if st.button("Cache leeren / Neu laden"):
+    if st.button("🔄 Reset / Neu laden"):
         st.cache_data.clear()
         st.rerun()
 
@@ -90,7 +89,7 @@ if schule_obj:
     # Koordinaten holen
     coords = get_coordinates(adresse)
     if not coords:
-        coords = [53.550, 9.992] # Fallback Rathaus
+        coords = [53.550, 9.992]
         st.sidebar.warning("Adresse nicht gefunden. Zeige Fallback.")
 
     # Header Metrics
@@ -103,75 +102,75 @@ if schule_obj:
     st.markdown("---")
 
     # TABS
-    tab_map, tab_docs = st.tabs(["🗺️ Kataster & Luftbild", "📂 Dokumente & Planung"])
+    tab_map, tab_docs = st.tabs(["🗺️ Karte & Satellit", "📂 Dokumente & Planung"])
 
     # --- TAB 1: KARTE ---
     with tab_map:
         col_map, col_info = st.columns([3, 1])
         
         with col_map:
-            # 1. Map OHNE Tiles initialisieren
+            # 1. Leere Karte starten (damit wir die Kontrolle haben)
             m = folium.Map(location=coords, zoom_start=19, tiles=None)
 
-            # 2. Stadtplan (Basis 1) - show=True macht ihn zum Start-Layer
-            folium.WmsTileLayer(
-                url=WMS_STADTPLAN,
-                layers="stadtplan_grau",
-                fmt="image/png",
-                name="Hamburg Stadtplan",
-                attr="Geoportal Hamburg",
-                overlay=False,  # Basis-Layer
+            # --- BASIS-LAYER 1: OpenStreetMap (Standard) ---
+            folium.TileLayer(
+                "OpenStreetMap",
+                name="Straßenkarte (OSM)",
+                overlay=False, # Basis-Layer
                 control=True,
-                show=True       # <--- HIERMIT ZWINGEN WIR IHN ZUM START
+                show=True # Startet hiermit
             ).add_to(m)
 
-            # 3. Luftbild (Basis 2) - show=False
-            folium.WmsTileLayer(
-                url=WMS_DOP,
-                layers="dop_zeitreihe_belaubt",
-                fmt="image/jpeg",
-                name="Hamburg Luftbild",
-                attr="Geoportal Hamburg",
-                overlay=False,  # Basis-Layer
+            # --- BASIS-LAYER 2: Esri World Imagery (Satellit) ---
+            # Dieser Dienst ist extrem stabil und weltweit verfügbar
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri World Imagery",
+                name="Satellit (Esri)",
+                overlay=False, # Basis-Layer (Alternative zu OSM)
                 control=True,
                 show=False
             ).add_to(m)
 
-            # 4. ALKIS (Overlay)
+            # --- OVERLAY: ALKIS (Hamburg Grundstückslinien) ---
+            # Liegt über OSM oder Satellit
             folium.WmsTileLayer(
                 url=WMS_ALKIS,
                 layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude",
                 fmt="image/png",
                 transparent=True,
-                name="ALKIS (Grenzen)",
+                name="ALKIS (Flurstücke)",
                 attr="Geoportal Hamburg",
                 overlay=True,
                 control=True
             ).add_to(m)
 
             # Marker
-            folium.Marker(coords, popup=schule_obj['name'], icon=folium.Icon(color="red", icon="home")).add_to(m)
+            folium.Marker(
+                coords, 
+                popup=schule_obj['name'], 
+                icon=folium.Icon(color="red", icon="home")
+            ).add_to(m)
             
             # Layer Control
             folium.LayerControl(collapsed=False).add_to(m)
 
-            # TRICK: Der 'key' Parameter sorgt dafür, dass Streamlit die Karte neu baut, 
-            # wenn sich die Schule (ID) ändert. Das verhindert Caching-Fehler.
-            st_folium(m, height=600, use_container_width=True, key=f"map_{schule_obj['id']}")
+            # Karte rendern
+            st_folium(m, height=600, use_container_width=True, key=f"map_v7_{schule_obj['id']}")
 
         with col_info:
-            st.info("ℹ️ **Legende**")
+            st.info("ℹ️ **Karten-Steuerung**")
             st.markdown("""
-            **Basis (Umschalten):**
-            * ⚪ Stadtplan (Grau)
-            * ⚪ Luftbild
+            Oben rechts in der Karte können Sie umschalten:
             
-            **Overlay:**
-            * ☑️ ALKIS (Kataster)
+            **Hintergrund:**
+            * ⚪ **Straßenkarte (OSM)**: Standard-Karte.
+            * ⚪ **Satellit (Esri)**: Hochauflösendes Luftbild.
             
-            _Sollte die Karte weiß bleiben, blockiert ggf. eine Firewall die Hamburger Geodienste._
+            **Ebenen:**
+            * ☑️ **ALKIS**: Zeigt Grundstücksgrenzen und Hausnummern (schwarze Linien).
             """)
-            st.link_button("↗️ Zu Geo-Online Hamburg", "https://geoportal-hamburg.de/geo-online/")
+            st.caption("Hinweis: Falls ALKIS-Linien fehlen, blockiert eine Firewall den Hamburger Server. OSM und Satellit sollten trotzdem gehen.")
 
     # --- TAB 2: DOKUMENTE ---
     with tab_docs:
