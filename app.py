@@ -25,9 +25,14 @@ SCHUL_DATEN = {
 
 # --- 2. KONFIGURATION & API URLs ---
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
+
 # WMS URLs (Geodienste Hamburg)
 WMS_ALKIS = "https://geodienste.hamburg.de/HH_WMS_ALKIS"
 WMS_DOP = "https://geodienste.hamburg.de/HH_WMS_DOP" 
+# NEU: Stadtplan als Alternative Hintergrundkarte
+WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
+# NEU: Bebauungspläne
+WMS_BPLAN = "https://geodienste.hamburg.de/HH_WMS_Bebauungsplaene"
 
 # --- 3. HELFER-FUNKTIONEN ---
 
@@ -36,19 +41,28 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor/1.0'}
+    # NEU: Wichtig für Nominatim: Referer oder Email hilft oft gegen Blockierung
+    headers = {
+        'User-Agent': 'HH-Schulbau-Monitor-StudentProject/1.0',
+        'Referer': 'http://localhost' 
+    }
     try:
-        response = requests.get(url, params=params, headers=headers)
+        # NEU: Timeout hinzugefügt (10 Sekunden warten), sonst bricht es zu früh ab
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status() # Wirft Fehler bei HTTP Errors
         data = response.json()
         if data:
             return [float(data[0]["lat"]), float(data[0]["lon"])]
-    except: return None
+    except Exception as e:
+        # NEU: Fehler im Log anzeigen, damit man weiß, warum es scheitert
+        print(f"Fehler bei Geocoding für {address_string}: {e}")
+        return None
     return None
 
 def query_transparenzportal(search_term, limit=5):
     params = {"q": search_term, "rows": limit, "sort": "score desc, metadata_modified desc"}
     try:
-        response = requests.get(API_URL_TRANSPARENZ, params=params)
+        response = requests.get(API_URL_TRANSPARENZ, params=params, timeout=5)
         data = response.json()
         return data["result"]["results"] if data.get("success") else []
     except: return []
@@ -80,18 +94,19 @@ with st.sidebar:
     schule_obj = st.selectbox("3. Schule", schulen_liste, format_func=lambda x: f"{x['name']} ({x['id']})")
     
     st.divider()
-    st.caption("Karten-Ebenen")
-    # Default ALKIS auf "True" für Kataster-Infos
-    show_alkis = st.checkbox("ALKIS (Flurstücke & Nummern)", value=True) 
-    show_luftbild = st.checkbox("Luftbild (DOP20)", value=True)
+    st.info("ℹ️ Kartenebenen können jetzt direkt in der Karte (Symbol oben rechts) gewechselt werden.")
 
 # --- 6. HAUPTBEREICH ---
 if schule_obj:
     adresse = schule_obj.get("address", "")
-    coords = get_coordinates(adresse)
     
-    # Fallback Coordinates (Rathaus)
-    if not coords: coords = [53.550, 9.992]
+    with st.spinner("Suche Koordinaten..."):
+        coords = get_coordinates(adresse)
+    
+    # Fallback Coordinates (Rathaus) mit Warnhinweis
+    if not coords: 
+        coords = [53.550, 9.992]
+        st.warning(f"Konnte Adresse '{adresse}' nicht finden. Zeige Rathaus (Fallback).")
 
     # A. INFO HEADER
     col1, col2, col3, col4 = st.columns(4)
@@ -107,76 +122,72 @@ if schule_obj:
 
     # --- TAB 1: KARTE ---
     with tab_map:
-        col_map, col_info = st.columns([3, 1])
-        
-        with col_map:
-            # Karte initialisieren
-            m = folium.Map(location=coords, zoom_start=19) # Zoom 19 ist wichtig für Flurstücksnummern!
+        # Karte initialisieren
+        m = folium.Map(location=coords, zoom_start=19, tiles=None) # tiles=None damit wir volle Kontrolle haben
 
-            # 1. Layer: Luftbild (Fix: Layer-Name "DOP" statt "dop20")
-            if show_luftbild:
-                folium.WmsTileLayer(
-                    url=WMS_DOP,
-                    layers="DOP",  # <--- HIER WAR DER FEHLER (Layer Name)
-                    fmt="image/jpeg",
-                    name="Luftbild",
-                    attr="Geoportal Hamburg"
-                ).add_to(m)
+        # NEU: Layer 1 - Basis: Stadtplan (Grau) - Oft besser lesbar als OSM
+        folium.WmsTileLayer(
+            url=WMS_STADTPLAN,
+            layers="stadtplan_grau",
+            fmt="image/png",
+            name="Stadtplan (Grau)",
+            attr="Geoportal Hamburg",
+            overlay=False, # Das ist ein "Base Layer"
+            control=True
+        ).add_to(m)
 
-            # 2. Layer: ALKIS (Transparent darüber)
-            if show_alkis:
-                # Flurstücke (Die schwarzen Linien)
-                folium.WmsTileLayer(
-                    url=WMS_ALKIS,
-                    layers="alkis_flurstuecke",
-                    fmt="image/png",
-                    transparent=True,
-                    name="ALKIS Grenzen",
-                    attr="Geoportal Hamburg"
-                ).add_to(m)
-                
-                # Flurstücksnummern & Texte (Wichtig!)
-                folium.WmsTileLayer(
-                    url=WMS_ALKIS,
-                    layers="alkis_bezeichnung", # <--- HIER SIND DIE NUMMERN
-                    fmt="image/png",
-                    transparent=True,
-                    name="ALKIS Nummern",
-                    attr="Geoportal Hamburg"
-                ).add_to(m)
-                
-                # Gebäudeumringe
-                folium.WmsTileLayer(
-                    url=WMS_ALKIS,
-                    layers="alkis_gebaeude",
-                    fmt="image/png",
-                    transparent=True,
-                    name="ALKIS Gebäude",
-                    attr="Geoportal Hamburg"
-                ).add_to(m)
+        # NEU: Layer 2 - Basis: Luftbild (DOP20)
+        folium.WmsTileLayer(
+            url=WMS_DOP,
+            layers="DOP",
+            fmt="image/jpeg",
+            name="Luftbild (DOP20)",
+            attr="Geoportal Hamburg",
+            overlay=False, # Auch als Base Layer nutzbar (dann wechseln sie sich exklusiv ab)
+            control=True
+        ).add_to(m)
 
-            # Marker
-            folium.Marker(
-                coords, 
-                popup=schule_obj['name'],
-                icon=folium.Icon(color="red", icon="home")
-            ).add_to(m)
+        # NEU: Layer 3 - Overlay: ALKIS (Grenzen & Nummern)
+        folium.WmsTileLayer(
+            url=WMS_ALKIS,
+            layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude", # Man kann Layer kommasepariert anfragen!
+            fmt="image/png",
+            transparent=True,
+            name="Kataster (ALKIS)",
+            attr="Geoportal Hamburg",
+            overlay=True, # Legt sich drüber
+            control=True
+        ).add_to(m)
 
-            st_folium(m, height=600, use_container_width=True)
+        # NEU: Layer 4 - Overlay: Bebauungspläne
+        folium.WmsTileLayer(
+            url=WMS_BPLAN,
+            layers="festgestellt", # Layername für festgestellte B-Pläne
+            fmt="image/png",
+            transparent=True,
+            name="Bebauungspläne",
+            attr="Geoportal Hamburg",
+            overlay=True,
+            show=False, # Standardmäßig aus
+            control=True
+        ).add_to(m)
 
-        with col_info:
-            st.info("ℹ️ **Hinweis zur Größe:**")
-            st.markdown("""
-            Die exakte Quadratmeterzahl (amtliche Fläche) ist in den Kartendiensten nicht direkt auslesbar.
-            
-            Um das **Flurstückskataster** einzusehen (inkl. Größe), nutzen Sie bitte den offiziellen Viewer der Stadt:
-            """)
-            
-            # Generischer Link zu Geo-Online (Startet Suche)
-            geo_online_link = "https://geoportal-hamburg.de/geo-online/"
-            st.link_button("↗️ Zu Geo-Online Hamburg", geo_online_link)
-            
-            st.caption("Dort können Sie auf das Grundstück klicken, um die Fläche in m² zu sehen.")
+        # Marker
+        folium.Marker(
+            coords, 
+            popup=schule_obj['name'],
+            tooltip=schule_obj['name'],
+            icon=folium.Icon(color="red", icon="home")
+        ).add_to(m)
+
+        # NEU: LayerControl - Das Zauberwerkzeug für Layer-Wechsel
+        folium.LayerControl(collapsed=False).add_to(m)
+
+        st_folium(m, height=600, use_container_width=True)
+
+        # Info Box drunter
+        st.caption("Nutzen Sie das Ebenen-Symbol oben rechts in der Karte, um zwischen Luftbild und Stadtplan zu wechseln.")
+
 
     # --- TAB 2: DOKUMENTE ---
     with tab_docs:
