@@ -35,7 +35,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-Final/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-Fixed/2.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -65,7 +65,7 @@ def extract_docs(results):
     return cleaned
 
 # --- 4. UI ---
-st.set_page_config(page_title="HH Schulbau Monitor V5", layout="wide")
+st.set_page_config(page_title="HH Schulbau Monitor V6", layout="wide")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # Sidebar
@@ -77,6 +77,11 @@ with st.sidebar:
     selected_stadtteil = st.selectbox("2. Stadtteil", stadtteile)
     schulen_liste = SCHUL_DATEN[selected_bezirk][selected_stadtteil]
     schule_obj = st.selectbox("3. Schule", schulen_liste, format_func=lambda x: f"{x['name']} ({x['id']})")
+    
+    st.divider()
+    if st.button("Cache leeren / Neu laden"):
+        st.cache_data.clear()
+        st.rerun()
 
 # MAIN
 if schule_obj:
@@ -105,76 +110,66 @@ if schule_obj:
         col_map, col_info = st.columns([3, 1])
         
         with col_map:
-            # WICHTIG: tiles=None verhindert, dass OSM als Standard gesetzt wird
-            # Das ist der Schlüssel zum sauberen Umschalten!
+            # 1. Map OHNE Tiles initialisieren
             m = folium.Map(location=coords, zoom_start=19, tiles=None)
 
-            # --- BASIS-LAYER (Radio Buttons) ---
-            # Alle layer hier müssen overlay=False haben!
-            
-            # 1. Stadtplan (Grau) - Als Standard
+            # 2. Stadtplan (Basis 1) - show=True macht ihn zum Start-Layer
             folium.WmsTileLayer(
                 url=WMS_STADTPLAN,
                 layers="stadtplan_grau",
                 fmt="image/png",
-                name="Stadtplan (Grau)",
+                name="Hamburg Stadtplan",
                 attr="Geoportal Hamburg",
-                overlay=False,  # WICHTIG: False = Basis-Layer
-                control=True
+                overlay=False,  # Basis-Layer
+                control=True,
+                show=True       # <--- HIERMIT ZWINGEN WIR IHN ZUM START
             ).add_to(m)
 
-            # 2. Luftbild
+            # 3. Luftbild (Basis 2) - show=False
             folium.WmsTileLayer(
                 url=WMS_DOP,
                 layers="dop_zeitreihe_belaubt",
                 fmt="image/jpeg",
-                name="Luftbild (Foto)",
+                name="Hamburg Luftbild",
                 attr="Geoportal Hamburg",
-                overlay=False,  # WICHTIG: False = Basis-Layer
-                control=True
+                overlay=False,  # Basis-Layer
+                control=True,
+                show=False
             ).add_to(m)
 
-            # 3. OpenStreetMap (als Alternative)
-            folium.TileLayer(
-                "OpenStreetMap",
-                name="OpenStreetMap",
-                overlay=False   # WICHTIG: False = Basis-Layer
-            ).add_to(m)
-
-            # --- OVERLAYS (Checkboxen) ---
-            
-            # 4. ALKIS (Kataster)
+            # 4. ALKIS (Overlay)
             folium.WmsTileLayer(
                 url=WMS_ALKIS,
                 layers="alkis_flurstuecke,alkis_bezeichnung,alkis_gebaeude",
                 fmt="image/png",
                 transparent=True,
-                name="ALKIS (Grenzen & Nummern)",
+                name="ALKIS (Grenzen)",
                 attr="Geoportal Hamburg",
-                overlay=True,   # WICHTIG: True = Legt sich drüber
+                overlay=True,
                 control=True
             ).add_to(m)
 
             # Marker
             folium.Marker(coords, popup=schule_obj['name'], icon=folium.Icon(color="red", icon="home")).add_to(m)
             
-            # Layer Control hinzufügen (generiert das Menü)
+            # Layer Control
             folium.LayerControl(collapsed=False).add_to(m)
 
-            st_folium(m, height=600, use_container_width=True)
+            # TRICK: Der 'key' Parameter sorgt dafür, dass Streamlit die Karte neu baut, 
+            # wenn sich die Schule (ID) ändert. Das verhindert Caching-Fehler.
+            st_folium(m, height=600, use_container_width=True, key=f"map_{schule_obj['id']}")
 
         with col_info:
-            st.info("ℹ️ **Ebenen steuern**")
+            st.info("ℹ️ **Legende**")
             st.markdown("""
-            Das Menü oben rechts in der Karte unterscheidet nun:
-            
-            **Basiskarten (Auswahl 1 aus 3):**
-            * ⚪ Stadtplan
+            **Basis (Umschalten):**
+            * ⚪ Stadtplan (Grau)
             * ⚪ Luftbild
-            * ⚪ OpenStreetMap
             
-            **Überlagerung:**
+            **Overlay:**
             * ☑️ ALKIS (Kataster)
+            
+            _Sollte die Karte weiß bleiben, blockiert ggf. eine Firewall die Hamburger Geodienste._
             """)
             st.link_button("↗️ Zu Geo-Online Hamburg", "https://geoportal-hamburg.de/geo-online/")
 
@@ -203,4 +198,4 @@ if schule_obj:
                         use_container_width=True
                     )
                 else:
-                    st.warning("Keine Dokumente im Transparenzportal gefunden.")
+                    st.warning("Keine Dokumente gefunden.")
