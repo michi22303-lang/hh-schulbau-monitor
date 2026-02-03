@@ -215,7 +215,7 @@ if schule_obj:
                 tooltip=folium.GeoJsonTooltip(fields=['gebaeudefunktion_bezeichnung'], aliases=['Typ:'], localize=True)
             ).add_to(m)
 
-        # 2. HIGHLIGHT SELECTED (Rot) [Image of highlighted building map]
+        # 2. HIGHLIGHT SELECTED (Rot) 
         if geo_buildings and selected_building_id:
             # Filtern des gewählten Gebäudes
             highlight_feat = [f for f in geo_buildings["features"] if (f.get("id") == selected_building_id or f.get("properties", {}).get("gml_id") == selected_building_id)]
@@ -278,4 +278,4 @@ if schule_obj:
 with st.expander("🔧 WFS URL (ALKIS Gebäude)"):
     st.write(debug_url)
     if not geo_buildings:
-        st.
+        st.error("Konnte keine Gebäude laden. Prüfe die URL.")
