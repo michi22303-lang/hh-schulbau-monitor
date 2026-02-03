@@ -4,6 +4,7 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, atan2
+import json
 
 # --- 1. DATENBASIS ---
 SCHUL_DATEN = {
@@ -28,12 +29,7 @@ STADTTEIL_INFOS = {
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 API_URL_WEATHER = "https://api.open-meteo.com/v1/forecast"
 
-# --- DIE HOSENTRÄGER-LÖSUNG ---
-# 1. WMS (Bild): Zeigt die blaue Fläche IMMER an, egal wo der Pin ist.
-WMS_SCHULEN_VISUAL = "https://geodienste.hamburg.de/HH_WMS_Schulimmobilien"
-
-# 2. WFS (Daten): Versucht die Daten abzugreifen (für Klickbarkeit)
-# Wir nutzen hier den LIG Dienst, der oft zuverlässiger antwortet
+# KORREKTE URL FÜR LIG (Landesbetrieb Immobilienmanagement)
 WFS_LIG_URL = "https://geodienste.hamburg.de/HH_WFS_LIG_Grundbesitz"
 
 # Hintergrund
@@ -49,7 +45,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-V20/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-V21/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -65,35 +61,50 @@ def get_weather_data(lat, lon):
         return r.json().get("current_weather", None)
     except: return None
 
-# --- WFS LOGIK MIT GRÖSSEREM SUCHRADIUS ---
+# --- DIE RETTUNG: WFS 1.0.0 ABFRAGE ---
 @st.cache_data(show_spinner=False)
-def get_school_property_wfs(lat, lon):
-    # WIR VERGRÖSSERN DAS NETZ MASSIV!
-    # 0.004 Grad sind ca. 300-400 Meter. Damit fangen wir das Grundstück,
-    # auch wenn der Pin auf der Straße davor liegt.
-    delta = 0.004 
+def fetch_school_vectors_robust(lat, lon):
+    # Wir nutzen einen "großzügigen" Suchradius (ca. 400m), 
+    # damit wir das Grundstück sicher treffen, auch wenn der Pin auf der Straße liegt.
+    delta = 0.004
     
-    # BBOX Reihenfolge: Lat, Lon (Standard für WFS 1.1.0/EPSG:4326)
-    bbox = f"{lat-delta},{lon-delta},{lat+delta},{lon+delta}" 
+    # WICHTIG: WFS 1.0.0 nutzt IMMER (Lon, Lat) -> (Rechts, Hoch)
+    # Das löst das Koordinaten-Chaos der neueren Versionen.
+    min_x, min_y = lon - delta, lat - delta
+    max_x, max_y = lon + delta, lat + delta
+    
+    bbox = f"{min_x},{min_y},{max_x},{max_y}"
     
     params = {
         "SERVICE": "WFS",
-        "VERSION": "1.1.0",
+        "VERSION": "1.0.0", # <--- DAS IST DER SCHLÜSSEL ZUM ERFOLG
         "REQUEST": "GetFeature",
         "TYPENAME": "bsb_sonderverm_schulimmobilien",
-        "OUTPUTFORMAT": "application/json",
+        "OUTPUTFORMAT": "GeoJSON", # Hamburg versteht GeoJSON auch in V1.0.0 oft
         "SRSNAME": "EPSG:4326",
-        "BBOX": f"{bbox},EPSG:4326"
+        "BBOX": f"{bbox}" # Bei 1.0.0 braucht man das EPSG hier oft nicht nochmal
     }
     
+    # Fallback: Falls GeoJSON fehlschlägt, versuchen wir GML, aber Streamlit mag JSON lieber.
+    # Wir probieren es direkt.
+    
+    debug_url = ""
     try:
-        r = requests.get(WFS_LIG_URL, params=params, timeout=6)
+        req = requests.Request('GET', WFS_LIG_URL, params=params)
+        prep = req.prepare()
+        debug_url = prep.url
+        
+        r = requests.Session().send(prep, timeout=8)
+        
         if r.status_code == 200:
-            return r.json(), r.url
+            try:
+                return r.json(), debug_url # Wenn es valides JSON ist
+            except:
+                return None, debug_url + " (Kein JSON)"
         else:
-            return None, r.url
+            return None, debug_url + f" (Status {r.status_code})"
     except Exception as e:
-        return None, str(e)
+        return None, f"{str(e)} | URL: {debug_url}"
 
 def query_transparenzportal(search_term, limit=5):
     try:
@@ -114,7 +125,7 @@ def extract_docs(results):
     return cleaned
 
 # --- 4. UI SETUP ---
-st.set_page_config(page_title="HH Schulbau Monitor V20", layout="wide", page_icon="🏫")
+st.set_page_config(page_title="HH Schulbau Monitor V21", layout="wide", page_icon="🏫")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # --- 5. SIDEBAR ---
@@ -126,22 +137,19 @@ with st.sidebar:
     schule_obj = st.selectbox("Schule", SCHUL_DATEN[sel_bez][sel_stadt], format_func=lambda x: f"{x['name']}")
     
     st.markdown("---")
-    st.header("Ebenen")
+    st.header("Layer")
     
     map_style = st.radio("Hintergrund:", ("Planung (Grau)", "Straßen (OSM)", "Satellit"), index=0)
     
-    st.caption("Eigentum (Doppel-Strategie)")
-    show_sv_wms = st.checkbox("🟦 Sondervermögen (Bild-Overlay)", value=True, help="Zeigt die blaue Fläche immer an (WMS).")
-    show_sv_wfs = st.checkbox("✒️ Sondervermögen (Interaktiv)", value=True, help="Versucht, die Fläche klickbar zu machen (WFS).")
+    st.caption("Eigentum (Vektor)")
+    # Jetzt sollte es klappen!
+    show_sv = st.checkbox("🟦 Sondervermögen (Interaktiv)", value=True, help="Lädt die Polygone per WFS 1.0.0")
     
-    st.caption("Planung")
-    show_alkis = st.checkbox("📐 Kataster-Plan (ALKIS)", value=True)
-    show_radius = st.checkbox("⭕ 1km Radius", value=False)
-    
-    st.caption("Umwelt")
+    st.caption("Planung & Umwelt")
+    show_alkis = st.checkbox("⬛ Kataster (ALKIS-Plan)", value=True)
     show_transit = st.checkbox("🚆 ÖPNV", value=True)
+    show_radius = st.checkbox("⭕ 1km Radius", value=False)
     show_laerm = st.checkbox("🔊 Straßenlärm", value=False)
-    show_hochwasser = st.checkbox("🌊 Hochwasser", value=False)
     show_denkmal = st.checkbox("🏛️ Denkmalschutz", value=False)
     
     if st.button("Reset"): st.cache_data.clear(); st.rerun()
@@ -151,28 +159,29 @@ if schule_obj:
     coords = get_coordinates(schule_obj["address"])
     if not coords: coords = [53.550, 9.992]; st.warning("Fallback Koordinaten.")
 
-    # VERSUCH: Vektordaten mit großem Netz
-    geo_sv, debug_url = get_school_property_wfs(coords[0], coords[1])
+    # DATEN LADEN (ROBUST)
+    geo_json_data, debug_url = fetch_school_vectors_robust(coords[0], coords[1])
     
-    sv_hits = 0
-    if geo_sv and 'features' in geo_sv:
-        sv_hits = len(geo_sv['features'])
+    # Checken ob was drin ist
+    feature_count = 0
+    if geo_json_data and 'features' in geo_json_data:
+        feature_count = len(geo_json_data['features'])
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Bezirk", sel_bez)
     c2.metric("Schüler", schule_obj["students"])
     
-    # Status
-    if sv_hits > 0:
-        c3.metric("Interaktive Daten", "✅ Geladen")
+    # STATUS ANZEIGE
+    if feature_count > 0:
+        c3.metric("Flächen geladen", f"{feature_count} ✅")
     else:
-        c3.metric("Interaktive Daten", "⚠️ Nur Bild-Overlay")
+        c3.metric("Flächen geladen", "0 ⚠️")
         
     c4.metric("KESS", schule_obj["kess"])
     
     st.markdown("---")
     
-    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Eigentum", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
+    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Analyse", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
 
     with tab_map:
         # Basis
@@ -184,42 +193,39 @@ if schule_obj:
         else:
             m = folium.Map(location=coords, zoom_start=18, tiles="cartodbpositron", attr="CartoDB")
 
-        # STRATEGIE 1: WMS (Bild) - Das Sicherheitsnetz!
-        if show_sv_wms:
-            folium.WmsTileLayer(
-                url=WMS_SCHULEN_VISUAL,
-                layers="bsb_sonderverm_schulimmobilien", # Layer Name für WMS
-                fmt="image/png",
-                transparent=True,
-                name="Sondervermögen (Bild)",
-                attr="Geoportal Hamburg",
-                overlay=True,
-                opacity=0.6 # Leicht transparentes Blau
-            ).add_to(m)
-
-        # STRATEGIE 2: WFS (Vektor) - Wenn verfügbar, drüberlegen für Tooltip
-        if show_sv_wfs and sv_hits > 0:
+        # 1. DAS BLAUE WUNDER (Vektordaten manuell zeichnen)
+        if show_sv and feature_count > 0:
             folium.GeoJson(
-                geo_sv,
-                name="Sondervermögen (Interaktiv)",
-                style_function=lambda x: {'fillColor': 'blue', 'color': 'navy', 'weight': 2, 'fillOpacity': 0.1}, # Fast durchsichtig, da WMS drunter liegt
-                tooltip=folium.GeoJsonTooltip(fields=['flurstueckskennzeichen'], aliases=['Flurstück:'], localize=True)
+                geo_json_data,
+                name="Sondervermögen Schulimmobilien",
+                style_function=lambda x: {
+                    'fillColor': '#0000ff',  # Knallblau
+                    'color': '#00008b',      # Dunkelblauer Rand
+                    'weight': 3,
+                    'fillOpacity': 0.5       # Halb-transparent
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=['flurstueckskennzeichen'], 
+                    aliases=['Flurstück:'], 
+                    localize=True,
+                    sticky=False
+                )
             ).add_to(m)
+        elif show_sv and feature_count == 0:
+            st.toast("Keine Vektordaten gefunden. Zeige nur Kataster-Plan.", icon="⚠️")
 
-        # Kataster Backup
+        # 2. ALKIS (Bild-Layer als Backup)
         if show_alkis:
             folium.WmsTileLayer(
                 url=WMS_STADTPLAN, layers="schwarzweiss", fmt="image/png", transparent=True, 
                 name="Kataster", attr="HH", overlay=True, opacity=0.7
             ).add_to(m)
 
-        # Overlays
+        # 3. Overlays
         if show_transit:
             folium.TileLayer(tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png", attr="OpenRailwayMap", overlay=True).add_to(m)
         if show_laerm:
             folium.WmsTileLayer(url=WMS_LAERM, layers="laerm_str_lden", fmt="image/png", transparent=True, opacity=0.5, name="Lärm", attr="HH", overlay=True).add_to(m)
-        if show_hochwasser:
-             folium.WmsTileLayer(url=WMS_HOCHWASSER, layers="ueberschwemmungsgebiete", fmt="image/png", transparent=True, opacity=0.5, name="Hochwasser", attr="HH", overlay=True).add_to(m)
         if show_denkmal:
             folium.WmsTileLayer(url=WMS_DENKMAL, layers="dk_denkmal_flaeche", fmt="image/png", transparent=True, opacity=0.6, name="Denkmal", attr="HH", overlay=True).add_to(m)
 
@@ -228,11 +234,10 @@ if schule_obj:
 
         folium.Marker(coords, popup=schule_obj["name"], icon=folium.Icon(color="red", icon="graduation-cap", prefix="fa")).add_to(m)
         
-        st_folium(m, height=650, use_container_width=True, key=f"map_v20_{schule_obj['id']}_{map_style}_{show_sv_wms}")
+        st_folium(m, height=650, use_container_width=True, key=f"map_v21_{schule_obj['id']}_{map_style}_{feature_count}")
         
-        # Erklärung
-        if show_sv_wms:
-            st.info("ℹ️ Die **blau-lila gefärbten Flächen** zeigen das amtliche Sondervermögen Schulimmobilien (via WMS).")
+        if feature_count > 0:
+            st.success("✅ Wir haben das amtliche Schulgrundstück erfolgreich geladen und blau eingefärbt!")
 
     # --- TAB 2: SOLAR ---
     with tab_solar:
@@ -256,7 +261,7 @@ if schule_obj:
             st.subheader("Profil")
             st.markdown(f"**{sel_stadt}**")
             st.progress(schule_obj['kess']/6)
-            st.caption("KESS (Sozialindex)")
+            st.caption("KESS")
 
     # --- TAB 4: AKTEN ---
     with tab_docs:
@@ -266,3 +271,10 @@ if schule_obj:
             with st.expander(f"🔎 {s['Topic']}", expanded=False):
                 data = query_transparenzportal(s['Q'])
                 if data: st.dataframe(pd.DataFrame(extract_docs(data)), hide_index=True)
+
+# --- DEBUGGER (Ganz wichtig!) ---
+with st.expander("🔧 Notfall-Debugger"):
+    st.write("Wir fragen diese URL ab (WFS 1.0.0):")
+    st.code(debug_url)
+    if feature_count == 0:
+        st.write("⚠️ Wenn hier 0 steht, haben wir trotz größerem Radius nichts gefunden. Evtl. ist der Layername 'bsb_sonderverm_schulimmobilien' für WFS 1.0.0 anders als für 2.0.0.")
