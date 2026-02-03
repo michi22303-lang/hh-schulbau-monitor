@@ -22,14 +22,16 @@ SCHUL_DATEN = {
 API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package_search"
 API_URL_WEATHER = "https://api.open-meteo.com/v1/forecast"
 
-# WFS DIENSTE
-# Wir nutzen den vereinfachten Dienst, der ist für Web-Apps optimiert
+# WFS (Vektordaten für Gebäude-Auswahl)
 WFS_ALKIS_SIMPLE = "https://geodienste.hamburg.de/WFS_HH_ALKIS_vereinfacht"
 
-# WMS DIENSTE (Hintergrundbilder)
+# WMS (Hintergrundbilder & Overlays)
 WMS_STADTPLAN = "https://geodienste.hamburg.de/HH_WMS_Stadtplan"
+WMS_ALKIS_BILD = "https://geodienste.hamburg.de/HH_WMS_ALKIS" # Spezieller Bild-Dienst für ALKIS
 WMS_SOLAR = "https://geodienste.hamburg.de/HH_WMS_Solaratlas"
 WMS_LAERM = "https://geodienste.hamburg.de/HH_WMS_Strassenlaerm_2017"
+WMS_HOCHWASSER = "https://geodienste.hamburg.de/HH_WMS_Ueberschwemmungsgebiete"
+WMS_DENKMAL = "https://geodienste.hamburg.de/HH_WMS_Denkmalkartierung"
 
 # --- 3. HELFER ---
 @st.cache_data(show_spinner=False)
@@ -37,7 +39,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-V24/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-V25/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -53,13 +55,13 @@ def get_weather_data(lat, lon):
         return r.json().get("current_weather", None)
     except: return None
 
-# --- DIE REPARATUR: ROBUSTE GEBÄUDE-ABFRAGE ---
+# --- GEBÄUDE DATEN LADEN (ROBUST) ---
 @st.cache_data(show_spinner=False)
 def get_buildings_robust(lat, lon):
     # Radius ca. 200m
     delta = 0.002
     
-    # STRATEGIE A: WFS 1.1.0 mit Lat, Lon (Standard für diesen Dienst)
+    # STRATEGIE A: WFS 1.1.0 mit Lat, Lon
     bbox_a = f"{lat-delta},{lon-delta},{lat+delta},{lon+delta}"
     
     params = {
@@ -74,33 +76,28 @@ def get_buildings_robust(lat, lon):
     
     debug_log = []
     
-    # Versuch 1
     try:
-        r = requests.get(WFS_ALKIS_SIMPLE, params=params, timeout=5)
-        debug_log.append(f"Versuch A (Lat/Lon): Status {r.status_code}")
-        
+        r = requests.get(WFS_ALKIS_SIMPLE, params=params, timeout=6)
         if r.status_code == 200:
             data = r.json()
             if data and "features" in data and len(data["features"]) > 0:
-                return data, debug_log # Treffer!
+                return data, debug_log
     except Exception as e:
-        debug_log.append(f"Fehler A: {str(e)}")
+        debug_log.append(f"A failed: {str(e)}")
 
-    # STRATEGIE B: WFS 1.0.0 mit Lon, Lat (Fallback, falls Server 'altmodisch' ist)
+    # STRATEGIE B: WFS 1.0.0 mit Lon, Lat (Fallback)
     bbox_b = f"{lon-delta},{lat-delta},{lon+delta},{lat+delta}"
     params["VERSION"] = "1.0.0"
-    params["BBOX"] = bbox_b # Bei 1.0.0 oft ohne EPSG Suffix
+    params["BBOX"] = bbox_b 
     
     try:
-        r = requests.get(WFS_ALKIS_SIMPLE, params=params, timeout=5)
-        debug_log.append(f"Versuch B (Lon/Lat): Status {r.status_code}")
-        
+        r = requests.get(WFS_ALKIS_SIMPLE, params=params, timeout=6)
         if r.status_code == 200:
             data = r.json()
             if data and "features" in data and len(data["features"]) > 0:
-                return data, debug_log # Treffer!
+                return data, debug_log
     except Exception as e:
-        debug_log.append(f"Fehler B: {str(e)}")
+        debug_log.append(f"B failed: {str(e)}")
 
     return None, debug_log
 
@@ -123,7 +120,7 @@ def extract_docs(results):
     return cleaned
 
 # --- 4. UI SETUP ---
-st.set_page_config(page_title="HH Schulbau Monitor V24", layout="wide", page_icon="🏫")
+st.set_page_config(page_title="HH Schulbau Monitor V25", layout="wide", page_icon="🏫")
 st.title("🏫 Hamburger Schulbau-Monitor")
 
 # --- 5. SIDEBAR ---
@@ -139,40 +136,41 @@ with st.sidebar:
     if not coords: coords = [53.550, 9.992]
 
     st.markdown("---")
-    st.header("2. Gebäude-Selektor")
+    st.header("2. Gebäude-Auswahl")
     
-    # Daten laden mit der neuen robusten Funktion
+    # Gebäude laden
     geo_buildings, debug_info = get_buildings_robust(coords[0], coords[1])
     
     selected_building_id = None
-    
     if geo_buildings and "features" in geo_buildings:
-        count = len(geo_buildings["features"])
-        st.success(f"{count} Gebäude erkannt")
-        
-        # Liste bauen
         b_options = []
         for f in geo_buildings["features"]:
             props = f.get("properties", {})
             bid = f.get("id")
-            nutzung = props.get("gebaeudefunktion_bezeichnung", "Gebäude")
-            if not nutzung: nutzung = "Gebäude"
-            
+            nutzung = props.get("gebaeudefunktion_bezeichnung", "Gebäude") or "Gebäude"
             b_options.append({"label": f"{nutzung} ({bid})", "id": bid})
             
-        # Dropdown
         sel = st.selectbox("Gebäude hervorheben:", b_options, format_func=lambda x: x["label"])
         selected_building_id = sel["id"]
-        
+        st.caption(f"{len(b_options)} Gebäude im Umkreis erkannt.")
     else:
-        st.warning("Keine Gebäude-Daten.")
-        with st.expander("Fehler-Details"):
-            st.write(debug_info)
+        st.warning("Keine Gebäudedaten.")
 
     st.markdown("---")
-    st.header("3. Layer")
+    st.header("3. Karten-Layer")
+    
     map_style = st.radio("Hintergrund:", ("Planung (Grau)", "Straßen (OSM)", "Satellit"), index=0)
-    show_alkis = st.checkbox("⬛ Kataster (Bild)", value=True)
+    
+    st.caption("Basis-Daten")
+    show_alkis_plan = st.checkbox("⬛ Flurstücke & Nummern", value=True, help="Zeigt den Katasterplan mit Grundstücksgrenzen")
+    show_radius = st.checkbox("⭕ 1km Radius", value=False)
+    
+    st.caption("Fach-Overlays")
+    show_transit = st.checkbox("🚆 ÖPNV & Bahn", value=True)
+    show_laerm = st.checkbox("🔊 Straßenlärm", value=False)
+    show_hochwasser = st.checkbox("🌊 Hochwasser", value=False)
+    show_denkmal = st.checkbox("🏛️ Denkmalschutz", value=False)
+    
     if st.button("Reset"): st.cache_data.clear(); st.rerun()
 
 # --- 6. MAIN ---
@@ -182,13 +180,14 @@ if schule_obj:
     c2.metric("Schüler", schule_obj["students"])
     
     cnt = len(geo_buildings['features']) if (geo_buildings and 'features' in geo_buildings) else 0
-    c3.metric("Gebäude im Radius", cnt)
+    c3.metric("Gebäude-Vektoren", cnt)
     
     st.markdown("---")
     
-    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Gebäude & Analyse", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
+    tab_map, tab_solar, tab_info, tab_docs = st.tabs(["🗺️ Karte & Analyse", "☀️ Solarpotenzial", "📊 Umfeld", "📂 Akten"])
 
     with tab_map:
+        # Basis
         if map_style == "Straßen (OSM)":
             m = folium.Map(location=coords, zoom_start=19, tiles="OpenStreetMap")
         elif map_style == "Satellit":
@@ -197,21 +196,19 @@ if schule_obj:
         else:
             m = folium.Map(location=coords, zoom_start=19, tiles="cartodbpositron", attr="CartoDB")
 
-        # 1. Alle Gebäude (Grau)
+        # 1. GEBÄUDE VEKTOREN (Grau)
         if geo_buildings and "features" in geo_buildings:
             folium.GeoJson(
                 geo_buildings,
                 name="Alle Gebäude",
-                style_function=lambda x: {'fillColor': '#999999', 'color': '#555555', 'weight': 1, 'fillOpacity': 0.3},
-                tooltip=folium.GeoJsonTooltip(fields=['gebaeudefunktion_bezeichnung'], aliases=['Nutzung:'], localize=True)
+                style_function=lambda x: {'fillColor': '#999999', 'color': '#444444', 'weight': 1, 'fillOpacity': 0.2},
+                tooltip=folium.GeoJsonTooltip(fields=['gebaeudefunktion_bezeichnung'], aliases=['Typ:'], localize=True)
             ).add_to(m)
 
-        # 2. Auswahl (Rot)
+        # 2. GEBÄUDE HIGHLIGHT (Rot)
         if geo_buildings and selected_building_id:
             feats = geo_buildings["features"]
-            # Suche das passende Feature
             target = next((f for f in feats if f.get("id") == selected_building_id), None)
-            
             if target:
                 folium.GeoJson(
                     target,
@@ -220,16 +217,38 @@ if schule_obj:
                     tooltip="Ausgewählt"
                 ).add_to(m)
 
-        # ALKIS Bild-Overlay
-        if show_alkis:
+        # 3. FLURSTÜCKE (ALKIS PLAN)
+        if show_alkis_plan:
             folium.WmsTileLayer(
-                url=WMS_STADTPLAN, layers="schwarzweiss", fmt="image/png", transparent=True, 
-                name="Kataster", attr="HH", overlay=True, opacity=0.6
+                url=WMS_STADTPLAN, 
+                layers="schwarzweiss", # Das ist der Layer, der Flurstücke und Nummern enthält
+                fmt="image/png", 
+                transparent=True, 
+                name="Flurstücke", 
+                attr="Geoportal Hamburg", 
+                overlay=True, 
+                opacity=0.6
             ).add_to(m)
+
+        # 4. OVERLAYS (Alle wieder da!)
+        if show_transit:
+            folium.TileLayer(tiles="https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png", attr="OpenRailwayMap", overlay=True).add_to(m)
+        
+        if show_laerm:
+            folium.WmsTileLayer(url=WMS_LAERM, layers="laerm_str_lden", fmt="image/png", transparent=True, opacity=0.5, name="Lärm", attr="HH", overlay=True).add_to(m)
+
+        if show_hochwasser:
+             folium.WmsTileLayer(url=WMS_HOCHWASSER, layers="ueberschwemmungsgebiete", fmt="image/png", transparent=True, opacity=0.5, name="Hochwasser", attr="HH", overlay=True).add_to(m)
+
+        if show_denkmal:
+            folium.WmsTileLayer(url=WMS_DENKMAL, layers="dk_denkmal_flaeche", fmt="image/png", transparent=True, opacity=0.6, name="Denkmal", attr="HH", overlay=True).add_to(m)
+
+        if show_radius:
+            folium.Circle(radius=1000, location=coords, color="#3186cc", fill=True, fill_opacity=0.05).add_to(m)
 
         folium.Marker(coords, popup=schule_obj["name"], icon=folium.Icon(color="red", icon="graduation-cap", prefix="fa")).add_to(m)
         
-        st_folium(m, height=600, use_container_width=True, key=f"map_v24_{selected_building_id}")
+        st_folium(m, height=650, use_container_width=True, key=f"map_v25_{selected_building_id}_{show_alkis_plan}")
 
     with tab_solar:
         col_s1, col_s2 = st.columns([3,1])
