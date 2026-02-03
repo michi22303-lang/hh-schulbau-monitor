@@ -23,7 +23,6 @@ API_URL_TRANSPARENZ = "https://suche.transparenz.hamburg.de/api/3/action/package
 API_URL_WEATHER = "https://api.open-meteo.com/v1/forecast"
 
 # DER STABILE DIENST: ALKIS (Kataster)
-# Hier holen wir uns die Gebäude-Vektoren
 WFS_ALKIS_URL = "https://geodienste.hamburg.de/HH_WFS_ALKIS"
 
 # Hintergrund-Bilder (WMS)
@@ -37,7 +36,7 @@ def get_coordinates(address_string):
     if not address_string: return None
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": address_string, "format": "json", "limit": 1}
-    headers = {'User-Agent': 'HH-Schulbau-Monitor-V22/1.0'}
+    headers = {'User-Agent': 'HH-Schulbau-Monitor-V22-Fix/1.0'}
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
         data = response.json()
@@ -105,20 +104,6 @@ def extract_docs(results):
         cleaned.append({"Dokument": item.get("title"), "Datum": item.get("metadata_modified", "")[:10], "Link": link})
     return cleaned
 
-# Mapping für Gebäudefunktionen (ALKIS Codes sind kryptisch, wir machen sie lesbar)
-def map_building_function(props):
-    # Versuchen, eine sinnvolle Beschreibung zu finden
-    # ALKIS hat oft Felder wie 'gebaeudefunktion' oder 'nutzungsart'
-    # Da die Felder variieren, bauen wir einen generischen Reader
-    
-    func = props.get("gebaeudefunktion", "Unbekannt")
-    code = props.get("gml_id", "ID-Unbekannt")
-    
-    # Einfaches Mapping (Beispiele)
-    # In der Realität sind das Zahlencodes (z.B. 3020 = Schule)
-    # Hier geben wir einfach die ID und den Typ zurück, damit du siehst was kommt
-    return f"{func} ({code})"
-
 # --- 4. UI SETUP ---
 st.set_page_config(page_title="HH Schulbau Monitor V22", layout="wide", page_icon="🏫")
 st.title("🏫 Hamburger Schulbau-Monitor")
@@ -182,7 +167,7 @@ if schule_obj:
     c1.metric("Bezirk", sel_bez)
     c2.metric("Schüler", schule_obj["students"])
     
-    if geo_buildings:
+    if geo_buildings and "features" in geo_buildings:
         c3.metric("Gebäude im Radius", len(geo_buildings['features']))
     else:
         c3.metric("Gebäude", "Ladefehler")
@@ -202,7 +187,7 @@ if schule_obj:
             m = folium.Map(location=coords, zoom_start=19, tiles="cartodbpositron", attr="CartoDB")
 
         # 1. ALLE GEBÄUDE (Grau/Transparent)
-        if geo_buildings:
+        if geo_buildings and "features" in geo_buildings:
             folium.GeoJson(
                 geo_buildings,
                 name="Alle Gebäude",
@@ -215,8 +200,8 @@ if schule_obj:
                 tooltip=folium.GeoJsonTooltip(fields=['gebaeudefunktion_bezeichnung'], aliases=['Typ:'], localize=True)
             ).add_to(m)
 
-        # 2. HIGHLIGHT SELECTED (Rot) 
-        if geo_buildings and selected_building_id:
+        # 2. HIGHLIGHT SELECTED (Rot)
+        if geo_buildings and selected_building_id and "features" in geo_buildings:
             # Filtern des gewählten Gebäudes
             highlight_feat = [f for f in geo_buildings["features"] if (f.get("id") == selected_building_id or f.get("properties", {}).get("gml_id") == selected_building_id)]
             
@@ -274,7 +259,7 @@ if schule_obj:
                 data = query_transparenzportal(s['Q'])
                 if data: st.dataframe(pd.DataFrame(extract_docs(data)), hide_index=True)
 
-# Debugger
+# Debugger am Ende
 with st.expander("🔧 WFS URL (ALKIS Gebäude)"):
     st.write(debug_url)
     if not geo_buildings:
